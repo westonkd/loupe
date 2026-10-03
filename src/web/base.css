@@ -1,0 +1,12 @@
+/* Element resets, in a layer ordered *below* Sprint's. Unlayered rules beat
+   every layered rule regardless of specificity, so if these lived in
+   theme.css they would override Sprint components (e.g. white text on an
+   acid button). Imported before Sprint's stylesheet so this @layer statement
+   fixes the order. */
+@layer app.base, sprint.tokens, sprint.base, sprint.components;
+
+@layer app.base {
+  button, input, select { font: inherit; color: inherit; }
+  a { color: var(--accent); }
+  code, pre, .mono { font-family: var(--mono); font-size: 11.5px; }
+}
