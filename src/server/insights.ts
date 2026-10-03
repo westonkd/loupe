@@ -12,12 +12,15 @@
 //      the newest session plus a fingerprint of every session that fed it.
 import type { DB } from './db.js';
 import { walkAgentChains, walkSessionContext } from './context.js';
-import { inputSideCost, cacheWriteCost } from '../shared/pricing.js';
+import { inputSideCost, cacheWriteCost, PRICE_TABLE_DATE } from '../shared/pricing.js';
 import { parseMcpToolName } from '../shared/mcp.js';
 import { CATEGORY_LABEL, toolCategory, type ToolCategory } from '../shared/tools.js';
 import type {
   CacheDiagnosis,
   CacheReasonCode,
+  InsightAdvice,
+  InsightAdviceKind,
+  InsightPreviousRow,
   InsightCacheReason,
   InsightRow,
   InsightTotals,
@@ -31,13 +34,14 @@ import type {
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /** Bump when the per-session payload shape changes; invalidates every row. */
-const PAYLOAD_VERSION = 3;
+const PAYLOAD_VERSION = 4;
 /**
  * Bump when the rolled-up view's shape changes. Separate from PAYLOAD_VERSION
  * so a change to the view costs a re-roll, not a re-walk of every session.
  */
-const CACHE_KEY_VERSION = 'v4';
+const CACHE_KEY_VERSION = 'v5';
 const MAX_ROWS = 2000;
+const DAY_MS = 86_400_000;
 
 const WASTED = new Set(['error', 'denied', 'interrupted']);
 
@@ -91,6 +95,16 @@ interface SessionAggregate {
     coldUsd: number;
     reasons: Record<string, { count: number; rewrittenTokens: number; rewrittenUsd: number }>;
   };
+  compaction: { count: number; discardedTokens: number; rewrittenTokens: number; rewrittenUsd: number };
+}
+
+function safeJson(v: string | null): any {
+  if (!v) return {};
+  try {
+    return JSON.parse(v);
+  } catch {
+    return {};
+  }
 }
 
 function emptyBucket(): Bucket {
@@ -140,7 +154,7 @@ function sum(m: Map<string, number>): number {
 
 /** Walk one session and bucket everything the walk attributed. */
 export function aggregateSession(db: DB, sessionId: string): SessionAggregate {
-  const { steps, tools } = walkSessionContext(db, sessionId);
+  const { steps, tools, records } = walkSessionContext(db, sessionId);
   const agg: SessionAggregate = {
     sessionId,
     requests: steps.length,
@@ -156,6 +170,7 @@ export function aggregateSession(db: DB, sessionId: string): SessionAggregate {
     skills: {},
     attachments: {},
     cache: { calls: 0, full: 0, partial: 0, eligibleCalls: 0, cold: 0, rewrittenTokens: 0, rewrittenUsd: 0, coldTokens: 0, coldUsd: 0, reasons: {} },
+    compaction: { count: 0, discardedTokens: 0, rewrittenTokens: 0, rewrittenUsd: 0 },
     inputUsd: 0,
     attributedUsd: 0,
   };
@@ -217,6 +232,8 @@ export function aggregateSession(db: DB, sessionId: string): SessionAggregate {
     // so it would poison the per-tool averages (same reason the Context panel
     // leaves it out of "top consumers").
     if (step.compaction) {
+      agg.compaction.rewrittenTokens += r.cw5m + r.cw1h;
+      agg.compaction.rewrittenUsd += cacheWriteCost(r.model, r.cw5m, r.cw1h, r.speed) ?? 0;
       // The prompt was rewritten, so nothing can be assumed to have survived it.
       carriedTools.clear();
       carriedSkills.clear();
@@ -281,6 +298,15 @@ export function aggregateSession(db: DB, sessionId: string): SessionAggregate {
     agg.attributedUsd += allocate(carriedAttachments, agg.attachments, 'estUsd', stepUsd, denom);
     allocate(carriedSkills, agg.skills, 'estUsd', stepUsd, denom);
     allocate(carriedWasted, agg.tools, 'wastedUsd', stepUsd, denom);
+  }
+
+  for (const rec of records) {
+    if (rec.type !== 'system' || rec.subtype !== 'compact_boundary') continue;
+    agg.compaction.count++;
+    const c = safeJson(rec.extra).compaction ?? {};
+    const pre = Number(c.preTokens);
+    const post = Number(c.postTokens);
+    if (Number.isFinite(pre) && Number.isFinite(post)) agg.compaction.discardedTokens += Math.max(0, pre - post);
   }
 
   // Calls that never produced an appended result (pending, or made inside a
@@ -348,36 +374,52 @@ export interface InsightsOptions {
   sinceDays?: number | null;
 }
 
+interface Span {
+  from: number | null;
+  to: number | null;
+}
+
+/** The window in scope, and the one of the same length just before it. */
+function spans(sinceDays: number | null | undefined): { current: Span; previous: Span | null } {
+  if (!sinceDays) return { current: { from: null, to: null }, previous: null };
+  const now = Date.now();
+  const len = sinceDays * DAY_MS;
+  return { current: { from: now - len, to: null }, previous: { from: now - 2 * len, to: now - len } };
+}
+
 /** Sessions in scope, newest last, with the numbers the cache key is built from. */
-function scopeSessions(db: DB, opts: InsightsOptions): ScopeRow[] {
+function scopeSessions(db: DB, opts: InsightsOptions, span: Span): ScopeRow[] {
   const rows = db
     .prepare(`SELECT session_id, project_dir, cwd, last_ts, record_count,
         CASE WHEN cost_cli IS NOT NULL AND cost_cli >= cost_est THEN cost_cli ELSE cost_est END AS cost
       FROM sessions WHERE record_count > 0 ORDER BY COALESCE(last_ts, '')`)
     .all() as ScopeRow[];
   const project = opts.project ?? null;
-  const cutoff = opts.sinceDays ? Date.now() - opts.sinceDays * 86_400_000 : null;
   return rows.filter((r) => {
     if (project && r.cwd !== project && r.project_dir !== project) return false;
-    if (cutoff !== null) {
-      const t = r.last_ts ? Date.parse(r.last_ts) : NaN;
-      if (!Number.isFinite(t) || t < cutoff) return false;
-    }
+    if (span.from === null && span.to === null) return true;
+    const t = r.last_ts ? Date.parse(r.last_ts) : NaN;
+    if (!Number.isFinite(t)) return false;
+    if (span.from !== null && t < span.from) return false;
+    if (span.to !== null && t >= span.to) return false;
     return true;
   });
 }
 
-function cacheKey(rows: ScopeRow[], opts: InsightsOptions): string {
+function fingerprint(rows: ScopeRow[]): string {
   const latest = rows[rows.length - 1];
   const records = rows.reduce((a, r) => a + r.record_count, 0);
+  return `${rows.length}:${records}:${latest ? `${latest.session_id}@${latest.last_ts ?? ''}` : '-'}`;
+}
+
+function cacheKey(rows: ScopeRow[], prevRows: ScopeRow[], opts: InsightsOptions): string {
   return [
     CACHE_KEY_VERSION,
     PAYLOAD_VERSION,
     opts.project ?? '*',
     opts.sinceDays ?? '*',
-    rows.length,
-    records,
-    latest ? `${latest.session_id}@${latest.last_ts ?? ''}` : '-',
+    fingerprint(rows),
+    fingerprint(prevRows),
   ].join('|');
 }
 
@@ -478,8 +520,6 @@ class RowSet {
   }
 }
 
-const DAY_MS = 86_400_000;
-
 /** Start of the bucket a timestamp falls in, as an ISO date (UTC). */
 function bucketStart(ms: number, unit: TrendUnit): string {
   const d = new Date(ms);
@@ -529,12 +569,13 @@ function buildTrend(rows: ScopeRow[], bySession: Map<string, SessionAggregate>, 
     sessions: 0,
     requests: 0,
     attributedTokens: 0,
+    attributedUsd: 0,
     rewrittenTokens: 0,
     costUsd: 0,
     toolCalls: 0,
   }));
 
-  type Band = { key: string; label: string; category?: ToolCategory; values: number[]; total: number };
+  type Band = { key: string; label: string; category?: ToolCategory; values: number[]; usdValues: number[]; total: number };
   const bands = new Map<InsightDimension, Map<string, Band>>(DIMENSIONS.map((d) => [d, new Map()]));
 
   for (const { r, ms } of dated) {
@@ -547,17 +588,26 @@ function buildTrend(rows: ScopeRow[], bySession: Map<string, SessionAggregate>, 
     if (!agg) continue;
     b.requests += agg.requests;
     b.attributedTokens += agg.attributedTokens;
+    b.attributedUsd += agg.attributedUsd;
     b.rewrittenTokens += agg.cache.rewrittenTokens;
     b.toolCalls += agg.toolCalls;
     for (const e of dimensionEntries(agg)) {
-      if (e.bucket.estTokens <= 0) continue;
+      if (e.bucket.estTokens <= 0 && e.bucket.estUsd <= 0) continue;
       const m = bands.get(e.dim)!;
       let band = m.get(e.key);
       if (!band) {
-        band = { key: e.key, label: e.label, category: e.category, values: new Array(starts.length).fill(0), total: 0 };
+        band = {
+          key: e.key,
+          label: e.label,
+          category: e.category,
+          values: new Array(starts.length).fill(0),
+          usdValues: new Array(starts.length).fill(0),
+          total: 0,
+        };
         m.set(e.key, band);
       }
       band.values[i] += e.bucket.estTokens;
+      band.usdValues[i] += e.bucket.estUsd;
       band.total += e.bucket.estTokens;
     }
   }
@@ -569,13 +619,21 @@ function buildTrend(rows: ScopeRow[], bySession: Map<string, SessionAggregate>, 
       const all = [...bands.get(dim)!.values()].sort((a, b) => b.total - a.total);
       const top = all.slice(0, MAX_BANDS);
       const rest = all.slice(MAX_BANDS);
-      const series: TrendSeries[] = top.map((b, i) => ({ key: b.key, label: b.label, category: b.category, colorIndex: i, values: b.values }));
+      const series: TrendSeries[] = top.map((b, i) => ({
+        key: b.key,
+        label: b.label,
+        category: b.category,
+        colorIndex: i,
+        values: b.values,
+        usdValues: b.usdValues,
+      }));
       if (rest.length) {
         series.push({
           key: '\u0000rest',
           label: `Other (${rest.length})`,
           colorIndex: -1,
           values: starts.map((_, i) => rest.reduce((a, b) => a + b.values[i], 0)),
+          usdValues: starts.map((_, i) => rest.reduce((a, b) => a + b.usdValues[i], 0)),
         });
       }
       return [dim, series];
@@ -585,13 +643,33 @@ function buildTrend(rows: ScopeRow[], bySession: Map<string, SessionAggregate>, 
   return { unit, buckets, stacks };
 }
 
-function rollup(db: DB, rows: ScopeRow[], aggregates: SessionAggregate[], opts: InsightsOptions, key: string, recomputed: number): InsightsView {
-  const byCategory = new RowSet();
-  const byTool = new RowSet();
-  const byMcpServer = new RowSet();
-  const byMcpTool = new RowSet();
-  const bySkill = new RowSet();
-  const byAttachment = new RowSet();
+interface Summary {
+  totals: InsightTotals;
+  dims: Record<InsightDimension, InsightRow[]>;
+  waste: {
+    calls: number;
+    full: number;
+    partial: number;
+    eligibleCalls: number;
+    cold: number;
+    rewrittenTokens: number;
+    rewrittenUsd: number;
+    coldTokens: number;
+    coldUsd: number;
+  };
+  reasons: InsightCacheReason[];
+  compaction: InsightsView['compaction'];
+}
+
+function summarize(rows: ScopeRow[], aggregates: SessionAggregate[]): Summary {
+  const sets: Record<InsightDimension, RowSet> = {
+    byCategory: new RowSet(),
+    byTool: new RowSet(),
+    byMcpServer: new RowSet(),
+    byMcpTool: new RowSet(),
+    bySkill: new RowSet(),
+    byAttachment: new RowSet(),
+  };
   const costBySession = new Map(rows.map((r) => [r.session_id, r.cost ?? 0]));
 
   const totals: InsightTotals = {
@@ -610,6 +688,7 @@ function rollup(db: DB, rows: ScopeRow[], aggregates: SessionAggregate[], opts: 
     attributedUsd: 0,
   };
   const waste = { calls: 0, full: 0, partial: 0, eligibleCalls: 0, cold: 0, rewrittenTokens: 0, rewrittenUsd: 0, coldTokens: 0, coldUsd: 0 };
+  const compaction = { count: 0, sessions: 0, discardedTokens: 0, rewrittenTokens: 0, rewrittenUsd: 0 };
   const reasons = new Map<CacheReasonCode, InsightCacheReason>();
 
   for (const agg of aggregates) {
@@ -636,6 +715,13 @@ function rollup(db: DB, rows: ScopeRow[], aggregates: SessionAggregate[], opts: 
     waste.rewrittenUsd += agg.cache.rewrittenUsd;
     waste.coldTokens += agg.cache.coldTokens;
     waste.coldUsd += agg.cache.coldUsd;
+
+    if (agg.compaction.count > 0) compaction.sessions++;
+    compaction.count += agg.compaction.count;
+    compaction.discardedTokens += agg.compaction.discardedTokens;
+    compaction.rewrittenTokens += agg.compaction.rewrittenTokens;
+    compaction.rewrittenUsd += agg.compaction.rewrittenUsd;
+
     for (const [code, e] of Object.entries(agg.cache.reasons)) {
       const c = code as CacheReasonCode;
       const cur = reasons.get(c) ?? { code: c, count: 0, rewrittenTokens: 0, rewrittenUsd: 0 };
@@ -645,17 +731,89 @@ function rollup(db: DB, rows: ScopeRow[], aggregates: SessionAggregate[], opts: 
       reasons.set(c, cur);
     }
 
-    const sets: Record<InsightDimension, RowSet> = { byCategory, byTool, byMcpServer, byMcpTool, bySkill, byAttachment };
     for (const e of dimensionEntries(agg)) sets[e.dim].add(e.key, e.label, e.category, e.bucket, sid);
   }
 
-  const projects = (
+  const dims = Object.fromEntries(DIMENSIONS.map((d) => [d, sets[d].finish()])) as Record<InsightDimension, InsightRow[]>;
+  return {
+    totals,
+    dims,
+    waste,
+    reasons: [...reasons.values()].sort((a, b) => b.rewrittenTokens - a.rewrittenTokens),
+    compaction,
+  };
+}
+
+const ADVICE_DIMENSIONS: InsightDimension[] = ['byMcpServer', 'bySkill', 'byTool'];
+
+function adviseFrom(summary: Summary): InsightAdvice[] {
+  const attributed = summary.totals.attributedUsd;
+  const share = (usd: number) => (attributed > 0 ? usd / attributed : 0);
+  const found = new Map<string, InsightAdvice>();
+  const flaggedServers = new Set<string>();
+
+  const consider = (dim: InsightDimension, row: InsightRow, kind: InsightAdviceKind) => {
+    const id = `${dim}:${row.key}`;
+    if (found.has(id)) return;
+    found.set(id, {
+      kind,
+      dimension: dim,
+      key: row.key,
+      label: row.label,
+      sessions: row.sessions,
+      calls: row.calls + row.subagentCalls,
+      estTokens: row.estTokens,
+      estUsd: row.estUsd,
+      wastedTokens: row.wastedTokens,
+      wastedUsd: row.wastedUsd,
+      shareOfAttributed: share(row.estUsd),
+    });
+    if (dim === 'byMcpServer') flaggedServers.add(row.key);
+  };
+
+  for (const dim of ADVICE_DIMENSIONS) {
+    for (const row of summary.dims[dim]) {
+      const mcp = parseMcpToolName(row.key);
+      if (dim === 'byTool' && mcp && flaggedServers.has(mcp.server)) continue;
+      const calls = row.calls + row.subagentCalls;
+      if (calls === 0) continue;
+      const perCall = row.estUsd / calls;
+      if (share(row.estUsd) >= 0.25) consider(dim, row, 'dominant');
+      else if (calls <= 5 && row.sessions <= 2 && row.estUsd >= 0.5 && perCall >= 0.1) consider(dim, row, 'rarely-used');
+      else if (calls >= 3 && perCall >= 0.25 && share(row.estUsd) >= 0.03) consider(dim, row, 'expensive-per-call');
+      else if (row.wastedUsd >= 1 && row.wastedUsd >= row.estUsd * 0.25) consider(dim, row, 'error-prone');
+    }
+  }
+  return [...found.values()].sort((a, b) => b.estUsd - a.estUsd).slice(0, 5);
+}
+
+function projectList(db: DB) {
+  return (
     db
       .prepare(`SELECT COALESCE(cwd, project_dir) AS value, COUNT(*) AS n FROM sessions
         WHERE record_count > 0 GROUP BY value ORDER BY n DESC`)
       .all() as Array<{ value: string; n: number }>
   ).map((p) => ({ value: p.value, label: p.value, sessions: p.n }));
+}
 
+function previousOf(rows: ScopeRow[], aggregates: SessionAggregate[], sinceDays: number): InsightsView['previous'] {
+  const summary = summarize(rows, aggregates);
+  const rowsByDim = Object.fromEntries(
+    DIMENSIONS.map((d) => [d, summary.dims[d].map((r) => ({ key: r.key, calls: r.calls, estTokens: r.estTokens, estUsd: r.estUsd }))]),
+  ) as Record<InsightDimension, InsightPreviousRow[]>;
+  return { sinceDays, totals: summary.totals, cacheWaste: summary.waste, rows: rowsByDim };
+}
+
+function rollup(
+  db: DB,
+  rows: ScopeRow[],
+  aggregates: SessionAggregate[],
+  opts: InsightsOptions,
+  key: string,
+  recomputed: number,
+  previous: InsightsView['previous'],
+): InsightsView {
+  const summary = summarize(rows, aggregates);
   const latest = rows[rows.length - 1];
   return {
     key,
@@ -664,22 +822,28 @@ function rollup(db: DB, rows: ScopeRow[], aggregates: SessionAggregate[], opts: 
     recomputed,
     scope: { project: opts.project ?? null, sinceDays: opts.sinceDays ?? null },
     latest: latest ? { sessionId: latest.session_id, lastTs: latest.last_ts } : null,
-    totals,
-    byCategory: byCategory.finish(),
-    byTool: byTool.finish(),
-    byMcpServer: byMcpServer.finish(),
-    byMcpTool: byMcpTool.finish(),
-    bySkill: bySkill.finish(),
-    byAttachment: byAttachment.finish(),
-    cacheWaste: { ...waste, reasons: [...reasons.values()].sort((a, b) => b.rewrittenTokens - a.rewrittenTokens) },
-    trend: buildTrend(rows, new Map(aggregates.map((a) => [a.sessionId, a])), costBySession),
-    projects,
+    totals: summary.totals,
+    byCategory: summary.dims.byCategory,
+    byTool: summary.dims.byTool,
+    byMcpServer: summary.dims.byMcpServer,
+    byMcpTool: summary.dims.byMcpTool,
+    bySkill: summary.dims.bySkill,
+    byAttachment: summary.dims.byAttachment,
+    cacheWaste: { ...summary.waste, reasons: summary.reasons },
+    compaction: summary.compaction,
+    advice: adviseFrom(summary),
+    previous,
+    priceTableDate: PRICE_TABLE_DATE,
+    trend: buildTrend(rows, new Map(aggregates.map((a) => [a.sessionId, a])), new Map(rows.map((r) => [r.session_id, r.cost ?? 0]))),
+    projects: projectList(db),
   };
 }
 
 export function buildInsights(db: DB, opts: InsightsOptions = {}): InsightsView {
-  const rows = scopeSessions(db, opts);
-  const key = cacheKey(rows, opts);
+  const span = spans(opts.sinceDays);
+  const rows = scopeSessions(db, opts, span.current);
+  const prevRows = span.previous ? scopeSessions(db, opts, span.previous) : [];
+  const key = cacheKey(rows, prevRows, opts);
   const hit = db.prepare('SELECT computed_at, payload FROM insight_cache WHERE key = ?').get(key) as
     | { computed_at: string; payload: string }
     | undefined;
@@ -691,7 +855,10 @@ export function buildInsights(db: DB, opts: InsightsOptions = {}): InsightsView 
     }
   }
   const { aggregates, recomputed } = loadAggregates(db, rows);
-  const view = rollup(db, rows, aggregates, opts, key, recomputed);
+  const prev = span.previous
+    ? previousOf(prevRows, loadAggregates(db, prevRows).aggregates, opts.sinceDays as number)
+    : null;
+  const view = rollup(db, rows, aggregates, opts, key, recomputed, prev);
   db.prepare(`INSERT INTO insight_cache (key, computed_at, payload) VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET computed_at = excluded.computed_at, payload = excluded.payload`).run(
     key,

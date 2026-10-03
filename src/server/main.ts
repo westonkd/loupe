@@ -39,6 +39,7 @@ function main() {
       finishedAt: null,
       lastPollMs: null,
       archive: cfg.archive,
+      archiveBytes: archive?.bytes ?? 0,
       version: VERSION,
     },
   };
@@ -47,6 +48,7 @@ function main() {
     const c = counts.get() as { r: number; s: number };
     state.status.records = c.r;
     state.status.sessions = c.s;
+    state.status.archiveBytes = archive?.bytes ?? 0;
   };
 
   let lastLiveKey = [...state.live].sort().join(',');

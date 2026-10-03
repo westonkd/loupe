@@ -3,6 +3,8 @@
 // `cost-state.totalCostUSD` is preferred for session totals when present.
 // Update this table by hand; the app never fetches prices at runtime (N5).
 
+export const PRICE_TABLE_DATE = '2026-09-25';
+
 export interface ModelPrice {
   input: number;
   output: number;

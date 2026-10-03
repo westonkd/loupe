@@ -6,8 +6,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export class Archive {
+  private total = 0;
+
   constructor(private readonly dir: string) {
     fs.mkdirSync(dir, { recursive: true });
+    this.total = dirSize(dir);
+  }
+
+  get bytes(): number {
+    return this.total;
   }
 
   append(relPath: string, offset: number, bytes: Buffer, reset: boolean) {
@@ -27,6 +34,24 @@ export class Archive {
     // Only append bytes we don't already have (restarts re-read from the index offset).
     if (offset + bytes.length <= size) return;
     const skip = Math.max(0, size - offset);
-    fs.appendFileSync(dest, bytes.subarray(skip));
+    const written = bytes.subarray(skip);
+    fs.appendFileSync(dest, written);
+    this.total += written.length;
   }
+}
+
+function dirSize(dir: string): number {
+  let total = 0;
+  for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) total += dirSize(full);
+    else if (ent.isFile()) {
+      try {
+        total += fs.statSync(full).size;
+      } catch {
+        total += 0;
+      }
+    }
+  }
+  return total;
 }

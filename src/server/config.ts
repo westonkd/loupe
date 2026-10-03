@@ -35,6 +35,6 @@ export function loadConfig(env = process.env): Config {
     rescanIntervalMs: envInt('RESCAN_INTERVAL_MS', 5000),
     liveWindowMs: envInt('LIVE_WINDOW_MS', 10 * 60_000),
     activeWindowMs: envInt('ACTIVE_WINDOW_MS', 60_000),
-    archive: env.ARCHIVE === '1' || env.ARCHIVE === 'true',
+    archive: env.ARCHIVE !== '0' && env.ARCHIVE !== 'false',
   };
 }

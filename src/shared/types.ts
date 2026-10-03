@@ -241,6 +241,8 @@ export interface IndexStatus {
   finishedAt: string | null;
   lastPollMs: number | null;
   archive: boolean;
+  /** Bytes of transcript kept in the archive, when it is on. */
+  archiveBytes: number;
   version: string;
 }
 
@@ -393,6 +395,7 @@ export interface TrendBucket {
   sessions: number;
   requests: number;
   attributedTokens: number;
+  attributedUsd: number;
   rewrittenTokens: number;
   costUsd: number;
   toolCalls: number;
@@ -407,6 +410,33 @@ export interface TrendSeries {
   colorIndex: number;
   /** One value per bucket, same order as `trend.buckets`. */
   values: number[];
+  /** The same bands priced, so the chart can be read in either unit. */
+  usdValues: number[];
+}
+
+export type InsightAdviceKind = 'rarely-used' | 'expensive-per-call' | 'error-prone' | 'dominant';
+
+export interface InsightAdvice {
+  kind: InsightAdviceKind;
+  dimension: InsightDimension;
+  key: string;
+  label: string;
+  sessions: number;
+  calls: number;
+  estTokens: number;
+  estUsd: number;
+  wastedTokens: number;
+  wastedUsd: number;
+  /** This row's share of everything the consumers table could attribute. */
+  shareOfAttributed: number;
+}
+
+/** One grouping's rows in the window before the one in scope, for deltas. */
+export interface InsightPreviousRow {
+  key: string;
+  calls: number;
+  estTokens: number;
+  estUsd: number;
 }
 
 export interface InsightsView {
@@ -445,6 +475,28 @@ export interface InsightsView {
    * redraws the chart and the table from the same keys.
    */
   trend: { unit: TrendUnit; buckets: TrendBucket[]; stacks: Record<InsightDimension, TrendSeries[]> };
+  /** What compaction cost: rewriting the prompt, and the history it dropped. */
+  compaction: {
+    count: number;
+    sessions: number;
+    discardedTokens: number;
+    rewrittenTokens: number;
+    rewrittenUsd: number;
+  };
+  /** Rows worth a second look, with the numbers behind the verdict. */
+  advice: InsightAdvice[];
+  /**
+   * The equivalent window immediately before this one, for change over time.
+   * Null when the scope has no bound to step back from.
+   */
+  previous: {
+    sinceDays: number;
+    totals: InsightTotals;
+    cacheWaste: Omit<InsightsView['cacheWaste'], 'reasons'>;
+    rows: Record<InsightDimension, InsightPreviousRow[]>;
+  } | null;
+  /** Date the bundled price table was last refreshed by hand. */
+  priceTableDate: string;
   /** Projects present in the index, for the scope picker. */
   projects: Array<{ value: string; label: string; sessions: number }>;
 }

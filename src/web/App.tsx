@@ -8,7 +8,7 @@ import { Context } from './panels/Context';
 import { Console } from './panels/Console';
 import { SessionInfo } from './panels/SessionInfo';
 import { Insights } from './panels/Insights';
-import { costTerm, fmtCost, fmtDateTime, fmtMs, homeRelative, shortModel } from './format';
+import { costTerm, fmtBytes, fmtCost, fmtDateTime, fmtMs, homeRelative, shortModel } from './format';
 import { Split, useMediaQuery, useStoredState } from './components/Layout';
 import { OverflowTips } from './components/OverflowTips';
 import { Logo } from './components/Logo';
@@ -235,7 +235,7 @@ export function App() {
               <span>{`${status.sessions.toLocaleString()} sessions, ${status.records.toLocaleString()} records`}</span>
             )}
             {status.lastPollMs !== null && <span>poll {status.lastPollMs} ms</span>}
-            {status.archive && <span>archive on</span>}
+            {status.archive && <span title="Raw transcripts are copied into the data volume so they survive Claude Code's cleanup. Set ARCHIVE=0 to keep nothing.">archive {fmtBytes(status.archiveBytes ?? 0)}</span>}
             <span style={{ flex: 1 }} />
             <span>read-only · v{status.version}</span>
           </>

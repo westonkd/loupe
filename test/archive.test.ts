@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import { Archive } from '../src/server/archive.js';
+import { loadConfig } from '../src/server/config.js';
 import { createApi } from '../src/server/api.js';
 import { openMemoryDb } from '../src/server/db.js';
 import { Indexer } from '../src/server/indexer.js';
@@ -56,5 +57,22 @@ describe('archive', () => {
     expect(s.hasTranscript).toBe(false);
     sse.close();
     server.close();
+  });
+
+  it('keeps history unless the operator opts out', () => {
+    expect(loadConfig({} as NodeJS.ProcessEnv).archive).toBe(true);
+    expect(loadConfig({ ARCHIVE: '1' } as NodeJS.ProcessEnv).archive).toBe(true);
+    expect(loadConfig({ ARCHIVE: '0' } as NodeJS.ProcessEnv).archive).toBe(false);
+    expect(loadConfig({ ARCHIVE: 'false' } as NodeJS.ProcessEnv).archive).toBe(false);
+  });
+
+  it('reports how much disk the archive is using', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devtools-archive-'));
+    const archive = new Archive(dir);
+    expect(archive.bytes).toBe(0);
+    archive.append('projects/p/a.jsonl', 0, Buffer.from('hello\n'), false);
+    archive.append('projects/p/b.jsonl', 0, Buffer.from('world!\n'), false);
+    expect(archive.bytes).toBe(13);
+    expect(new Archive(dir).bytes).toBe(13);
   });
 });

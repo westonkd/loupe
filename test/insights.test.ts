@@ -358,6 +358,81 @@ describe('cross-session insights', () => {
     expect(v.cacheWaste.coldTokens).toBeGreaterThanOrEqual(20_000);
   });
 
+  it('prices what compaction rewrote and the history it dropped', () => {
+    const db = indexed({
+      [SID]: [
+        at(rec.prompt('look at things', 0), '2026-01-01T00:00:00.000Z'),
+        at(rec.toolUse('req_1', 'toolu_a', 'Read', { file_path: '/repo/big.ts' }, 0, usage(10, 100, 0, 5000)), '2026-01-01T00:00:02.000Z'),
+        at(rec.toolResult('toolu_a', 0, { text: 'x'.repeat(40_000) }), '2026-01-01T00:00:03.000Z'),
+        at(rec.compact(0), '2026-01-01T00:00:04.000Z'),
+        at(rec.assistantText('req_2', 'done', 0, usage(10, 20, 0, 9000)), '2026-01-01T00:00:06.000Z'),
+      ],
+    });
+    const c = buildInsights(db).compaction;
+    expect(c.count).toBe(1);
+    expect(c.sessions).toBe(1);
+    expect(c.discardedTokens).toBe(150_000 - 12_000);
+    expect(c.rewrittenTokens).toBe(9000);
+    expect(c.rewrittenUsd).toBeCloseTo((9000 * 4 * 1.25) / 1_000_000, 10);
+  });
+
+  it('flags a source that dominates spend and one that is barely used', () => {
+    const db = indexed({
+      [SID]: [
+        at(rec.prompt('work', 0), '2026-01-01T00:00:00.000Z'),
+        at(rec.toolUse('req_1', 'toolu_b', 'Bash', { command: 'ls' }, 0, usage(10, 100, 0, 50_000)), '2026-01-01T00:00:02.000Z'),
+        at(rec.toolResult('toolu_b', 0, { text: 'b'.repeat(400_000) }), '2026-01-01T00:00:03.000Z'),
+        at(rec.toolUse('req_2', 'toolu_m', 'mcp__jira__getJiraIssue', { issue: 'A-1' }, 0, usage(10, 100, 50_000, 1_000_000)), '2026-01-01T00:00:06.000Z'),
+        at(rec.toolResult('toolu_m', 0, { text: 'z'.repeat(40_000) }), '2026-01-01T00:00:07.000Z'),
+        at(rec.assistantText('req_3', 'done', 0, usage(10, 100, 1_050_000, 500_000)), '2026-01-01T00:00:09.000Z'),
+        at(rec.assistantText('req_4', 'more', 0, usage(10, 20, 1_550_000, 2_000)), '2026-01-01T00:00:12.000Z'),
+      ],
+    });
+    const advice = buildInsights(db).advice;
+    const bash = advice.find((a) => a.key === 'Bash')!;
+    expect(bash.kind).toBe('dominant');
+    expect(bash.shareOfAttributed).toBeGreaterThan(0.25);
+
+    const jira = advice.find((a) => a.dimension === 'byMcpServer')!;
+    expect(jira.key).toBe('jira');
+    expect(jira.kind).toBe('rarely-used');
+    expect(jira.calls).toBe(1);
+    expect(advice.filter((a) => a.key.startsWith('mcp__jira__'))).toHaveLength(0);
+  });
+
+  it('compares a bounded window against the one before it', () => {
+    const daysAgo = (n: number, s = 0) => new Date(Date.now() - n * 86_400_000 + s * 1000).toISOString();
+    const session = (d: number) => [
+      at(rec.prompt('work', 0), daysAgo(d)),
+      at(rec.toolUse('req_1', 'toolu_a', 'Read', { file_path: '/repo/a.ts' }, 0, usage(10, 100, 0, 5000)), daysAgo(d, 2)),
+      at(rec.toolResult('toolu_a', 0, { text: 'x'.repeat(40_000) }), daysAgo(d, 3)),
+      at(rec.assistantText('req_2', 'done', 0, usage(10, 20, 5000, 10_100)), daysAgo(d, 6)),
+    ];
+    const db = indexed({ [SID]: session(1), [SID2]: session(9) });
+
+    const windowed = buildInsights(db, { sinceDays: 7 });
+    expect(windowed.totals.sessions).toBe(1);
+    expect(windowed.previous?.sinceDays).toBe(7);
+    expect(windowed.previous?.totals.sessions).toBe(1);
+    expect(windowed.previous?.rows.byTool.find((r) => r.key === 'Read')?.estTokens).toBe(
+      windowed.byTool.find((r) => r.key === 'Read')!.estTokens,
+    );
+    expect(windowed.previous?.cacheWaste.rewrittenTokens).toBeGreaterThanOrEqual(0);
+
+    const all = buildInsights(db);
+    expect(all.totals.sessions).toBe(2);
+    expect(all.previous).toBeNull();
+  });
+
+  it('carries the trend in both units and names the price table it used', () => {
+    const v = buildInsights(indexed({ [SID]: twoToolSession() }));
+    expect(v.priceTableDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const read = v.byTool.find((r) => r.key === 'Read')!;
+    const band = v.trend.stacks.byTool.find((b) => b.key === 'Read')!;
+    expect(band.values.reduce((a, b) => a + b, 0)).toBe(read.estTokens);
+    expect(band.usdValues.reduce((a, b) => a + b, 0)).toBeCloseTo(read.estUsd, 10);
+  });
+
   it('keeps the index free of transcript content (R10)', () => {
     const db = indexed({ [SID]: twoToolSession() });
     buildInsights(db);

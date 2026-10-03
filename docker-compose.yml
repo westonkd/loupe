@@ -17,9 +17,9 @@ services:
       CLAUDE_DIR: /claude
       DATA_DIR: /data
       POLL_INTERVAL_MS: "1000"
-      # Set to 1 to copy raw transcripts into the data volume so history
-      # survives Claude Code's periodic cleanup.
-      ARCHIVE: "${ARCHIVE:-0}"
+      # Raw transcripts are copied into the data volume so history survives
+      # Claude Code's periodic cleanup. Set to 0 to keep nothing.
+      ARCHIVE: "${ARCHIVE:-1}"
     ports:
       - "127.0.0.1:${DEVTOOLS_PORT:-7878}:7878"
     volumes:
@@ -50,7 +50,7 @@ services:
     container_name: claude-devtools-dev
     environment:
       POLL_INTERVAL_MS: "1000"
-      ARCHIVE: "${ARCHIVE:-0}"
+      ARCHIVE: "${ARCHIVE:-1}"
     ports:
       - "127.0.0.1:${DEVTOOLS_DEV_PORT:-5174}:5174"
     volumes:

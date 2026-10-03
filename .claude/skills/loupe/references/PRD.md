@@ -66,6 +66,8 @@ Serving and UI
 - Panels: Calls, Transcript, Context, Console, Session, with legacy URL aliases (`network` → `calls`, `elements` → `transcript`) kept working.
 - **R12** — Cross-session insights (`#/insights`) aggregate every indexed session into context cost by tool category, tool, MCP server, MCP tool, skill and injected-attachment kind, plus cache waste by cause. Each grouping is reported in tokens and in approximate dollars, by sharing every model call's prompt-side cost across what that prompt contained (see `references/ADR/20261002215545_*`). Every headline figure reconciles with the rows beneath it, and the scope is the whole session, subagents included; the definitions and the invariants they hold to are in `references/ADR/20261002233129_*`. The aggregate is cached in two levels — per session, invalidated by the session's record count, and per (project, window) scope, keyed by the newest session that fed it — so a page load never re-derives work the index already paid for. See `references/ADR/20261002205740_*`.
 - **R13** — The same aggregate is shown over time as stacked buckets (day, week or month, chosen from the span in scope). One grouping control drives both the chart's stack and the table, both read the same key derivation, and hovering a band or a row highlights that key in both — so a single source can be followed across the whole span.
+- **R14** — The view argues for a decision rather than only reporting: rows whose numbers warrant a second look are surfaced with the figures behind the verdict, a bounded window is compared against the equal-length window before it, tokens rather than dollars lead by default, and the share of spend the attribution explains and the price table's date are stated on screen. See `references/ADR/20261003083842_*`.
+- **R15** — Transcripts are archived by default (`ARCHIVE=0` opts out), because the index's value compounds with history that Claude Code deletes. The archive's size is reported in the status bar, since it spends the operator's disk.
 
 ## Platform assessment / spikes
 
@@ -75,8 +77,9 @@ Serving and UI
 
 ## Open questions
 
-- Should the archive (`ARCHIVE=1`) be the default, given Claude Code's cleanup deletes the data the app exists to show?
-- Is the bundled price table (cached 2026-09-25) worth keeping as the UI grows, or should estimated costs be marked more loudly and the table trimmed?
+- ~~Should the archive be the default?~~ Settled 2026-10-03: yes, see R15. Still open: nothing prunes it, so a retention policy is unwritten.
+- Are the "worth a look" thresholds right? They have been exercised against one real index only (see `references/ADR/20261003083842_*`).
+- Is the bundled price table (cached 2026-09-25) worth keeping as the UI grows? Estimates are now marked on screen with the table's date, but the table is still refreshed by hand.
 - The `._*` AppleDouble files committed next to several sources are noise; remove them or ignore them?
 - Nothing is recorded in `references/ADR/` yet for the three decisions above; they are still the first ones worth writing down. (The insights cache decision is recorded.)
 - Attribution is main-agent only, so a subagent's internal tool calls are counted but carry no tokens of their own. Should the walk descend into subagent transcripts, or is "the Agent result is what the parent paid" the right model?
