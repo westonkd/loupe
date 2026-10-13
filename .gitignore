@@ -5,3 +5,5 @@ data/
 .env
 docker-compose.override.yml
 ._*
+.DS_Store
+.claude/settings.local.json

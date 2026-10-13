@@ -1,9 +1,14 @@
 {
-  "name": "claude-devtools",
+  "name": "loupe",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Browser-devtools-style UI for inspecting Claude Code sessions from ~/.claude (read-only).",
+  "license": "MIT",
+  "author": "Weston Dransfield",
+  "repository": { "type": "git", "url": "git+https://github.com/westonkd/loupe.git" },
+  "homepage": "https://github.com/westonkd/loupe#readme",
+  "bugs": { "url": "https://github.com/westonkd/loupe/issues" },
   "engines": {
     "node": ">=22"
   },
