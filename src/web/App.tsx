@@ -31,7 +31,7 @@ const INSIGHTS = 'insights';
 
 function parseHash(): { sid: string | null; tab: Tab; sub: string | null; insights: boolean } {
   const parts = window.location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  const tab = (TABS.find(([t]) => t === parts[1])?.[0] ?? LEGACY_TABS[parts[1]] ?? 'calls') as Tab;
+  const tab = (TABS.find(([t]) => t === parts[1])?.[0] ?? LEGACY_TABS[parts[1]] ?? 'transcript') as Tab;
   if (parts[0] === INSIGHTS) return { sid: null, tab, sub: null, insights: true };
   return { sid: parts[0] ? decodeURIComponent(parts[0]) : null, tab, sub: parts[2] ? decodeURIComponent(parts[2]) : null, insights: false };
 }
@@ -92,7 +92,7 @@ export function App() {
     if (ev.type === 'status') setStatus(ev.status);
   });
 
-  const go = useCallback((s: string | null, t: Tab = 'calls') => {
+  const go = useCallback((s: string | null, t: Tab = 'transcript') => {
     window.location.hash = s ? `#/${encodeURIComponent(s)}/${t}` : '#/';
   }, []);
   const openRecord = useCallback(
