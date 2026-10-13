@@ -8,7 +8,13 @@ RUN apt-get update \
 WORKDIR /app
 COPY package.json package-lock.json ./
 
+# A TLS-intercepting proxy breaks `npm ci` with SELF_SIGNED_CERT_IN_CHAIN. Point
+# npm at the proxy's CA bundle when one is mounted; without it, nothing changes.
 RUN --mount=type=secret,id=extra_ca,required=false \
+    if [ -s /run/secrets/extra_ca ]; then \
+      cp /run/secrets/extra_ca /usr/local/share/extra-ca.pem; \
+      export NODE_EXTRA_CA_CERTS=/usr/local/share/extra-ca.pem; \
+    fi; \
     npm ci
 COPY tsconfig*.json vite.config.ts ./
 COPY src ./src
