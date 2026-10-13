@@ -15,11 +15,11 @@ import { Logo } from './components/Logo';
 import { SidebarToggle } from './components/SidebarToggle';
 import { Alert, MetaLine, Pending, Progress, SegmentedControl, Tag } from '@westonkd/sprint';
 
-type Tab = 'calls' | 'transcript' | 'context' | 'console' | 'session';
+type Tab = 'transcript' | 'context' | 'calls' | 'console' | 'session';
 const TABS: Array<[Tab, string]> = [
-  ['calls', 'Calls'],
   ['transcript', 'Transcript'],
   ['context', 'Context'],
+  ['calls', 'Calls'],
   ['console', 'Console'],
   ['session', 'Session'],
 ];
